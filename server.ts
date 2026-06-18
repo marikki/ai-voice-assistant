@@ -895,31 +895,29 @@ Return ONLY that JSON for the chosen category.`;
 //  - reminder needs only date — time is optional (user said "remind me tomorrow", that's enough).
 //  - genuinely unclear type → ask "task / event / note?".
 //  - tasks and notes never block.
-function clarificationNeeded(parsed: AISchema): Clarification | null {
+function clarificationNeeded(parsed: AISchema, lang: "en" | "uk" = "uk"): Clarification | null {
   const isCalendar = parsed.target_service === "google_calendar";
   const isUnclear = parsed.target_service === "unclear" || parsed.type === "unclear";
   const isReminder = parsed.type === "reminder";
 
   if (isCalendar) {
     const missingDate = !parsed.date;
-    // Reminders only need a date; calendar_events need both date and time.
     const missingTime = !isReminder && !parsed.start_time;
     if (missingDate || missingTime) {
-      const what = missingDate && missingTime ? "дату и время" : missingDate ? "дату" : "время";
-      return {
-        reason: "missing_datetime",
-        question: isReminder
-          ? `🗓️ «${parsed.title}» → в календарь. Уточни дату (например: «завтра», «19 июня»).`
-          : `🗓️ «${parsed.title}» → в календарь. Уточни ${what} (например: «завтра в 15:00»).`,
-        attempts: 1,
-      };
+      const question = lang === "en"
+        ? isReminder
+          ? `🗓️ "${parsed.title}" → calendar. What date? (e.g. "tomorrow", "June 25")`
+          : `🗓️ "${parsed.title}" → calendar. What ${missingDate && missingTime ? "date and time" : missingDate ? "date" : "time"}? (e.g. "tomorrow at 3pm")`
+        : isReminder
+          ? `🗓️ «${parsed.title}» → календар. Уточни дату (наприклад: «завтра», «25 червня»).`
+          : `🗓️ «${parsed.title}» → календар. Уточни ${missingDate && missingTime ? "дату і час" : missingDate ? "дату" : "час"} (наприклад: «завтра о 15:00»).`;
+      return { reason: "missing_datetime", question, attempts: 1 };
     }
   } else if (isUnclear) {
-    return {
-      reason: "ambiguous_type",
-      question: `🤔 «${parsed.title}» — это задача, событие (в календарь) или заметка? Ответь одним словом.`,
-      attempts: 1,
-    };
+    const question = lang === "en"
+      ? `🤔 "${parsed.title}" — is this a task, a calendar event, or a note? Reply with one word.`
+      : `🤔 «${parsed.title}» — це задача, подія (в календар) або нотатка? Відповідь одним словом.`;
+    return { reason: "ambiguous_type", question, attempts: 1 };
   }
   return null;
 }
@@ -968,16 +966,29 @@ async function finalizeItem(item: Item, db: Database): Promise<void> {
 }
 
 // Compact human label for a finalized item (used in Telegram confirmations).
-function finalizeLabel(item: Item): string {
+// Detect response language from transcript: English if >60% of word-chars are ASCII letters.
+function detectLang(text: string): "en" | "uk" {
+  const letters = text.replace(/[^a-zA-Zа-яА-ЯіІїЇєЄґҐёЁ]/g, "");
+  if (!letters) return "uk";
+  const ascii = letters.replace(/[^a-zA-Z]/g, "").length;
+  return ascii / letters.length > 0.6 ? "en" : "uk";
+}
+
+function finalizeLabel(item: Item, lang: "en" | "uk" = "uk"): string {
   const SVC: Record<string, string> = {
     google_calendar: "📅 Calendar",
     notion: "📝 Notion",
     reminders: "✅ Tasks",
   };
   const svc = SVC[item.target_service] || item.target_service;
-  if (item.status === "saved") return `✅ Создано: «${item.ai_parsed_result.title}» → ${svc}`;
+  if (item.status === "saved")
+    return lang === "en"
+      ? `✅ Saved: "${item.ai_parsed_result.title}" → ${svc}`
+      : `✅ Збережено: «${item.ai_parsed_result.title}» → ${svc}`;
   if (item.status === "needs_review")
-    return `📥 «${item.ai_parsed_result.title}» сохранил в «требует уточнения»${item.error_message ? ` (${item.error_message})` : ""}`;
+    return lang === "en"
+      ? `📥 "${item.ai_parsed_result.title}" → needs review${item.error_message ? ` (${item.error_message})` : ""}`
+      : `📥 «${item.ai_parsed_result.title}» → потребує уточнення${item.error_message ? ` (${item.error_message})` : ""}`;
   return `«${item.ai_parsed_result.title}» → ${item.status}`;
 }
 
@@ -1268,10 +1279,10 @@ app.post("/api/shortcut", aiLimiter, async (req, res) => {
   const db = getDb();
   const parsed = await aiParse(transcript, language ?? "uk", db);
   const newItem = buildItem(parsed, transcript);
+  const responseLang = detectLang(transcript);
 
-  const clar = clarificationNeeded(parsed);
+  const clar = clarificationNeeded(parsed, responseLang);
   if (clar) {
-    // Don't save yet — park as awaiting_clarification and push the question to Telegram.
     newItem.status = "awaiting_clarification";
     newItem.clarification = clar;
     db.items.unshift(newItem);
@@ -1291,6 +1302,7 @@ app.post("/api/shortcut", aiLimiter, async (req, res) => {
       status: "awaiting_clarification",
       clarification: { reason: clar.reason, question: clar.question },
       transcript,
+      response_lang: responseLang,
     });
   }
 
@@ -1298,7 +1310,6 @@ app.post("/api/shortcut", aiLimiter, async (req, res) => {
   db.items.unshift(newItem);
   saveDb(db);
 
-  // Return compact response for Shortcuts / bot notification
   return res.json({
     ok: true,
     item_id: newItem.id,
@@ -1307,6 +1318,8 @@ app.post("/api/shortcut", aiLimiter, async (req, res) => {
     status: newItem.status,
     error_message: newItem.error_message,
     transcript,
+    response_lang: responseLang,
+    label: finalizeLabel(newItem, responseLang),
   });
 });
 
@@ -1381,9 +1394,8 @@ app.post("/api/clarify", aiLimiter, async (req, res) => {
   item.item_type = parsed.type;
   item.target_service = parsed.target_service;
 
-  const stillNeeds = clarificationNeeded(parsed);
-  // Reset the attempt counter when the question CHANGES (e.g. type → datetime),
-  // so a newly-surfaced gap gets its own fair attempts.
+  const responseLang = detectLang(item.original_transcript);
+  const stillNeeds = clarificationNeeded(parsed, responseLang);
   const reasonChanged = stillNeeds && stillNeeds.reason !== prevReason;
   const attemptsSoFar = reasonChanged ? 0 : (item.clarification.attempts ?? 1);
 
@@ -1400,13 +1412,12 @@ app.post("/api/clarify", aiLimiter, async (req, res) => {
   }
 
   if (stillNeeds) {
-    // Give up gracefully → leave in needs_review queue.
     item.status = "needs_review";
     item.clarification = { ...item.clarification, resolved: true };
-    item.error_message = "Не удалось уточнить — оставил в очереди.";
+    item.error_message = responseLang === "en" ? "Couldn't clarify — moved to review queue." : "Не вдалося уточнити — відклала в чергу.";
     item.updated_at = new Date().toISOString();
     saveDb(db);
-    return res.json({ ok: true, item_id: item.id, status: "needs_review", label: finalizeLabel(item) });
+    return res.json({ ok: true, item_id: item.id, status: "needs_review", label: finalizeLabel(item, responseLang) });
   }
 
   // Resolved → finalize + sync.
@@ -1416,7 +1427,7 @@ app.post("/api/clarify", aiLimiter, async (req, res) => {
   return res.json({
     ok: true, item_id: item.id, status: item.status,
     title: parsed.title, service: parsed.target_service,
-    error_message: item.error_message, label: finalizeLabel(item),
+    error_message: item.error_message, label: finalizeLabel(item, responseLang),
   });
 });
 

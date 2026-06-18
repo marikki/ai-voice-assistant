@@ -74,24 +74,27 @@ const SERVICE_LABEL = {
   google_calendar: "📅 Google Calendar",
   notion: "📝 Notion",
   reminders: "✅ Google Tasks",
-  unclear: "❓ требует уточнения",
+  unclear: "❓",
 };
 
 // Returns the text to send for a capture result, or null if the bot should
-// stay silent (e.g. awaiting_clarification — the server already pushed the
-// question to this chat).
+// stay silent (e.g. awaiting_clarification — the server already pushed the question).
 function formatResult(r) {
-  const label = SERVICE_LABEL[r.service] || r.service || "—";
-  if (r.status === "awaiting_clarification") {
-    return null; // server sent the question itself
-  }
-  if (r.status === "saved") {
-    return `✅ Записала: «${r.title}»\n→ ${label}`;
-  }
-  if (r.status === "needs_review") {
-    return `📥 «${r.title}» → отложила в «требует уточнения»${r.error_message ? `\n(${r.error_message})` : ""}`;
-  }
-  return `📥 «${r.title}» → ${label} (${r.status})`;
+  if (r.status === "awaiting_clarification") return null;
+  // Prefer the server-built label (already language-aware)
+  if (r.label) return r.label;
+  // Fallback
+  const lang = r.response_lang || "uk";
+  const svc = SERVICE_LABEL[r.service] || r.service || "—";
+  if (r.status === "saved")
+    return lang === "en"
+      ? `✅ Saved: "${r.title}" → ${svc}`
+      : `✅ Збережено: «${r.title}» → ${svc}`;
+  if (r.status === "needs_review")
+    return lang === "en"
+      ? `📥 "${r.title}" → moved to review queue`
+      : `📥 «${r.title}» → відклала в чергу`;
+  return `«${r.title}» → ${svc} (${r.status})`;
 }
 
 async function callClarify(payload) {
@@ -196,7 +199,7 @@ async function handleMessage(msg) {
       } else if (count > 1) {
         await sendMessage(
           chatId,
-          `❓ Открытых вопросов несколько (${count}). Ответь reply'ем на нужный — и я запишу. Ничего нового не создаю.`,
+          `❓ There are ${count} open questions. Reply to the one you're answering — I won't create anything new until then.`,
           replyTo,
         );
         return; // do NOT fall through to capture
