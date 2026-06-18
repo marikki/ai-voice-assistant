@@ -1,0 +1,17 @@
+{
+  "items": [],
+  "settings": {
+    "google_calendar_connected": false,
+    "notion_connected": false,
+    "google_tasks_connected": false,
+    "notion_database_id": "",
+    "notion_token": "",
+    "auto_save_threshold": 0.7,
+    "default_language": "en",
+    "mock_mode": true
+  },
+  "simulated_calendar": [],
+  "simulated_notion": [],
+  "simulated_tasks": [],
+  "_google_tokens_enc": ""
+}

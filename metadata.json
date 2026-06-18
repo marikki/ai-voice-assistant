@@ -1,0 +1,6 @@
+{
+  "name": "AI Voice Assistant",
+  "description": "Personal AI assistant for voice inputting tasks, notes, events, and reminders with auto-sync to Notion, Calendar, and Tasks.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

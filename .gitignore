@@ -1,0 +1,18 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+# Local runtime database — contains real secrets (Notion token, Google OAuth tokens)
+# and personal voice notes. Never commit. Use db.example.json as the template.
+db.json
+
+# Generated iOS Shortcut embeds the live SHORTCUT_TOKEN — keep it local.
+public/VoiceMind.shortcut
+
+# Telegram bot polling offset — runtime state, not source.
+.telegram-bot-offset.json
