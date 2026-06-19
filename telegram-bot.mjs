@@ -25,7 +25,11 @@ const BOT_TOKEN = process.env.TELEGRAM_IVOICE_BOT_TOKEN;
 const SHORTCUT_TOKEN = process.env.IVOICE_SHORTCUT_TOKEN || process.env.SHORTCUT_TOKEN;
 const ALLOWED_CHAT_ID = String(process.env.IVOICE_ALLOWED_CHAT_ID || "").trim();
 const IVOICE_URL = (process.env.IVOICE_URL || "http://127.0.0.1:3002").replace(/\/$/, "");
-const LANG = process.env.IVOICE_LANG || "uk";
+const DEFAULT_LANG = process.env.IVOICE_LANG || "uk";
+
+// Session-level language override: /en or /uk command toggles Whisper transcription language.
+// null = auto-detect (default for voice).
+let sessionLang = null;
 
 if (!BOT_TOKEN || !SHORTCUT_TOKEN) {
   console.error("[voicemind-tg] Missing TELEGRAM_IVOICE_BOT_TOKEN or IVOICE_SHORTCUT_TOKEN");
@@ -104,7 +108,7 @@ async function callClarify(payload) {
       "Content-Type": "application/json",
       Authorization: `Bearer ${SHORTCUT_TOKEN}`,
     },
-    body: JSON.stringify({ language: LANG, ...payload }),
+    body: JSON.stringify({ language: DEFAULT_LANG, ...payload }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `iVoice HTTP ${res.status}`);
@@ -143,7 +147,7 @@ async function callShortcut(payload) {
       "Content-Type": "application/json",
       Authorization: `Bearer ${SHORTCUT_TOKEN}`,
     },
-    body: JSON.stringify({ language: LANG, ...payload }),
+    body: JSON.stringify({ language: DEFAULT_LANG, ...payload }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `iVoice HTTP ${res.status}`);
@@ -165,7 +169,22 @@ async function handleMessage(msg) {
   if (!audio && !text) return;
 
   if (text === "/start") {
-    await sendMessage(chatId, "🎙️ Готова принимать. Надиктуй голосовое или напиши текст — разложу по местам.", replyTo);
+    await sendMessage(chatId, "🎙️ Ready. Send a voice note or text — I'll file it in the right place.\n\nCommands: /en (English mode) · /uk (Ukrainian mode) · /auto (auto-detect)", replyTo);
+    return;
+  }
+  if (text === "/en") {
+    sessionLang = "en";
+    await sendMessage(chatId, "🇬🇧 English mode on — voice messages will be transcribed in English.", replyTo);
+    return;
+  }
+  if (text === "/uk") {
+    sessionLang = "uk";
+    await sendMessage(chatId, "🇺🇦 Українська. Голосові — транскрипція по-українськи.", replyTo);
+    return;
+  }
+  if (text === "/auto") {
+    sessionLang = null;
+    await sendMessage(chatId, "🔄 Auto-detect on.", replyTo);
     return;
   }
 
@@ -209,7 +228,7 @@ async function handleMessage(msg) {
     // ── 3) Normal capture ──────────────────────────────────────────────────
     let result;
     if (audio) {
-      result = await callShortcut({ audio: await getAudioB64() });
+      result = await callShortcut({ audio: await getAudioB64(), language: sessionLang });
     } else {
       result = await callShortcut({ text });
     }

@@ -1006,6 +1006,7 @@ app.post("/api/items/reset", requireApiSecret, (_req, res) => {
 });
 
 // 3. Analyze transcript (AI core)
+// ── /api/analyze — parse only, do NOT save ────────────────────
 app.post("/api/analyze", aiLimiter, async (req, res) => {
   const { transcript, language } = req.body;
   if (!transcript || typeof transcript !== "string") {
@@ -1015,101 +1016,136 @@ app.post("/api/analyze", aiLimiter, async (req, res) => {
     return res.status(400).json({ error: "Transcript too long (max 2000 chars)" });
   }
 
-  const db = getDb();
-  const threshold = db.settings.auto_save_threshold || 0.85;
-  let parsed: AISchema;
+  const lang = language ?? "uk";
+  let parsedItems: AISchema[];
 
   if (ai) {
     try {
       const today = new Date().toISOString().split("T")[0];
-      const prompt = `You are an AI command router. Analyze this spoken transcript and return JSON.
+      const prompt = `You are an AI command router. The user spoke ONE message that may contain MULTIPLE separate intents (e.g. "tomorrow meeting with Andrii, buy coffee, and save idea about voice reminders").
+
+Split the transcript into individual items — one per intent. Return ALL of them.
 
 TRANSCRIPT: "${transcript.replace(/"/g, "'")}"
-TODAY: ${today}. Language: ${language ?? "ru"} (ru=Russian, uk=Ukrainian, en=English). Generate title/description in the same language as the transcript.
+TODAY: ${today}. Detect the language from the transcript and generate titles/descriptions in THAT language.
 
-RULES:
-1. calendar_event → scheduled meeting/call/event with date+time → target_service: google_calendar
-2. reminder → "remind me", "напомни", "нагадай" → target_service: google_calendar. If no time mentioned set start_time to "09:00". If time is mentioned use that time.
+CLASSIFICATION RULES:
+1. calendar_event → meeting/call/event with date+time → target_service: google_calendar
+2. reminder → "нагадай", "remind me", "нагадати" → target_service: google_calendar. If no time given, set start_time "09:00".
 3. notion_note → idea, thought, note, concept → target_service: notion
-4. task → todo without specific time: buy, do, make, clean, call, купити, зробити, нагадай → target_service: reminders (Google Tasks)
-5. unclear → ambiguous → target_service: unclear
+4. task → todo, buy, do, make, pay (without specific time) → target_service: reminders
+5. unclear → truly ambiguous → target_service: unclear
 
-TARGET SERVICES: google_calendar, notion, reminders, unclear
-
-Return ONLY valid JSON:
-{
-  "type": "calendar_event|reminder|notion_note|task|unclear",
-  "title": "short readable title",
-  "description": "expanded description",
-  "date": "YYYY-MM-DD or null",
-  "start_time": "HH:mm or null",
-  "end_time": "HH:mm or null",
-  "duration_minutes": number or null,
-  "priority": "low|medium|high|null",
-  "target_service": "google_calendar|notion|reminders|unclear",
-  "tags": ["tag1", "tag2"],
-  "auto_save": true/false,
-  "needs_review": true/false,
-  "confidence": 0.0-1.0
-}`;
+Return ONLY valid JSON — no extra text:
+{"items": [
+  {
+    "type": "calendar_event|reminder|notion_note|task|unclear",
+    "title": "short readable title in transcript language",
+    "description": "one-sentence description",
+    "date": "YYYY-MM-DD or null",
+    "start_time": "HH:mm or null",
+    "end_time": "HH:mm or null",
+    "duration_minutes": number or null,
+    "priority": "low|medium|high",
+    "target_service": "google_calendar|notion|reminders|unclear",
+    "tags": ["tag1"],
+    "confidence": 0.0
+  }
+]}`;
 
       const response = await ai.chat.completions.create({
         model: "gpt-4o-mini",
         response_format: { type: "json_object" },
         messages: [
-          { role: "system", content: "Return only valid JSON. No other text." },
+          { role: "system", content: 'Return only valid JSON with an "items" array. No other text.' },
           { role: "user", content: prompt },
         ],
       });
 
-      parsed = JSON.parse(response.choices[0].message.content?.trim() ?? "{}");
+      const json = JSON.parse(response.choices[0].message.content?.trim() ?? "{}");
+      if (Array.isArray(json.items) && json.items.length > 0) {
+        parsedItems = json.items;
+      } else if (json.type) {
+        // Old single-item format fallback
+        parsedItems = [json as AISchema];
+      } else {
+        parsedItems = [fallbackParseTranscript(transcript, lang)];
+      }
     } catch (err) {
       console.error("OpenAI failed, using fallback:", err);
-      parsed = fallbackParseTranscript(transcript, language ?? "ru");
+      parsedItems = [fallbackParseTranscript(transcript, lang)];
     }
   } else {
-    parsed = fallbackParseTranscript(transcript, language ?? "ru");
+    parsedItems = [fallbackParseTranscript(transcript, lang)];
   }
 
-  if (parsed.confidence < threshold) {
-    parsed.auto_save = false;
-    parsed.needs_review = true;
-  }
+  // Normalise — ensure required fields exist
+  parsedItems = parsedItems.map(p => ({
+    ...p,
+    auto_save: true,
+    needs_review: false,
+    confidence: p.confidence ?? 0.85,
+  }));
 
-  const newItem: Item = {
-    id: `item_${Date.now()}`,
-    original_transcript: transcript,
-    ai_parsed_result: parsed,
-    item_type: parsed.type,
-    target_service: parsed.target_service,
-    external_service_id: null,
-    status: "needs_review",
-    confidence: parsed.confidence,
-    error_message: null,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
+  return res.json({ items: parsedItems, transcript });
+});
+
+// ── /api/items/batch — save a list of pre-parsed items ────────
+app.post("/api/items/batch", aiLimiter, async (req, res) => {
+  const { transcript, items: parsedItems } = req.body as {
+    transcript?: string;
+    items: AISchema[];
   };
 
-  const service = parsed.target_service;
-  const isConnected =
-    (service === "google_calendar" && db.settings.google_calendar_connected) ||
-    (service === "notion"          && db.settings.notion_connected) ||
-    (service === "reminders"       && db.settings.google_tasks_connected);
-
-  if (parsed.auto_save && isConnected && parsed.confidence >= threshold) {
-    newItem.status = "saved";
-    await syncToRealServices(newItem, db);
-  } else if (!isConnected && service !== "unclear" && parsed.auto_save) {
-    newItem.status = "needs_review";
-    newItem.error_message = `Сервис не подключён (${service}). Подключи в настройках.`;
-  } else {
-    newItem.status = "needs_review";
-    newItem.error_message = "Низкая уверенность AI или неполные данные.";
+  if (!Array.isArray(parsedItems) || parsedItems.length === 0) {
+    return res.status(400).json({ error: "items array required" });
   }
 
-  db.items.unshift(newItem);
+  const db = getDb();
+  const threshold = db.settings.auto_save_threshold || 0.85;
+  const savedItems: Item[] = [];
+
+  for (let i = 0; i < parsedItems.length; i++) {
+    const parsed = parsedItems[i];
+    const conf = parsed.confidence ?? 0.85;
+
+    const newItem: Item = {
+      id: `item_${Date.now()}_${i}`,
+      original_transcript: transcript || "",
+      ai_parsed_result: { ...parsed, auto_save: true, needs_review: conf < threshold },
+      item_type: parsed.type,
+      target_service: parsed.target_service,
+      external_service_id: null,
+      status: "needs_review",
+      confidence: conf,
+      error_message: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    const svc = parsed.target_service;
+    const isConnected =
+      (svc === "google_calendar" && db.settings.google_calendar_connected) ||
+      (svc === "notion"          && db.settings.notion_connected)           ||
+      (svc === "reminders"       && db.settings.google_tasks_connected);
+
+    if (conf >= threshold && isConnected) {
+      newItem.status = "saved";
+      await syncToRealServices(newItem, db);
+    } else if (!isConnected && svc !== "unclear") {
+      newItem.status = "needs_review";
+      newItem.error_message = `Сервіс не підключено (${svc}). Підключи у налаштуваннях.`;
+    } else {
+      newItem.status = "needs_review";
+      newItem.error_message = "Низька впевненість AI або неповні дані.";
+    }
+
+    db.items.unshift(newItem);
+    savedItems.push(newItem);
+  }
+
   saveDb(db);
-  return res.json(newItem);
+  return res.json({ items: savedItems });
 });
 
 // 4. Update item
@@ -1133,13 +1169,16 @@ app.put("/api/items/:id", (req, res) => {
 });
 
 // 5. Delete item
-app.delete("/api/items/:id", (req, res) => {
+app.delete("/api/items/:id", async (req, res) => {
   const { id } = req.params;
   const db = getDb();
   const idx = db.items.findIndex(i => i.id === id);
   if (idx === -1) return res.status(404).json({ error: "Not found" });
 
-  const extId = db.items[idx].external_service_id;
+  const item = db.items[idx];
+  const extId = item.external_service_id;
+  const service = item.target_service;
+
   db.items.splice(idx, 1);
   if (extId) {
     db.simulated_calendar = db.simulated_calendar.filter(e => e.id !== extId);
@@ -1147,6 +1186,28 @@ app.delete("/api/items/:id", (req, res) => {
     db.simulated_tasks    = db.simulated_tasks.filter(e => e.id !== extId);
   }
   saveDb(db);
+
+  // Also delete from real external services
+  if (extId && !db.settings.mock_mode && db.google_tokens) {
+    try {
+      const auth = await getAuthedClient(db.google_tokens, db);
+      if (service === "google_calendar") {
+        const cal = google.calendar({ version: "v3", auth });
+        await cal.events.delete({ calendarId: "primary", eventId: extId });
+        console.log("Google Calendar event deleted:", extId);
+      } else if (service === "reminders") {
+        const tasks = google.tasks({ version: "v1", auth });
+        const lists = await tasks.tasklists.list({ maxResults: 1 });
+        const listId = lists.data.items?.[0]?.id ?? "@default";
+        await tasks.tasks.delete({ tasklist: listId, task: extId });
+        console.log("Google Task deleted:", extId);
+      }
+    } catch (err: any) {
+      // Log but don't fail — item is already removed from local DB
+      console.error("External delete failed:", err.message);
+    }
+  }
+
   res.json({ success: true });
 });
 
@@ -1243,7 +1304,11 @@ app.post("/api/shortcut", aiLimiter, async (req, res) => {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
-  const { audio, language = "uk", text } = req.body;
+  const { audio, language, text } = req.body;
+  // null means "auto-detect"; undefined/missing falls back to "uk"
+  const effectiveLang: "ru" | "en" | "uk" | null =
+    language === null ? null :
+    (["ru", "en", "uk"] as const).includes(language) ? language : "uk";
 
   let transcript: string | null = null;
 
@@ -1262,7 +1327,8 @@ app.post("/api/shortcut", aiLimiter, async (req, res) => {
       const result = await ai.audio.transcriptions.create({
         file,
         model: "whisper-1",
-        language: (["ru", "en", "uk"] as const).includes(language as any) ? language as "ru" | "en" | "uk" : "uk",
+        // effectiveLang === null → no hint, Whisper auto-detects language
+        ...(effectiveLang ? { language: effectiveLang } : {}),
       });
       transcript = result.text?.trim() ?? null;
     } catch (err) {
@@ -1277,9 +1343,9 @@ app.post("/api/shortcut", aiLimiter, async (req, res) => {
 
   // Parse, then decide: clarify (calendar w/o date+time, or ambiguous) vs save now.
   const db = getDb();
-  const parsed = await aiParse(transcript, language ?? "uk", db);
-  const newItem = buildItem(parsed, transcript);
   const responseLang = detectLang(transcript);
+  const parsed = await aiParse(transcript, effectiveLang ?? responseLang, db);
+  const newItem = buildItem(parsed, transcript);
 
   const clar = clarificationNeeded(parsed, responseLang);
   if (clar) {

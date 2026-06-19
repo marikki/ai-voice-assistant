@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { ArrowLeft, Trash2, RefreshCw, Calendar, FileText, CheckSquare, Clock, Save, Hash } from "lucide-react";
+import { RefreshCw, Clock, Save, Hash } from "lucide-react";
 import StatusBadge from "./StatusBadge";
 
 interface AISchema {
@@ -125,31 +125,6 @@ export default function DetailView({ item, onBack, onUpdate, onDelete, onSync, l
 
   return (
     <div className="w-full flex flex-col gap-6">
-      
-      {/* Upper Navigation Row */}
-      <div className="flex items-center justify-between bg-zinc-50 border border-zinc-150 rounded-2xl p-4">
-        <button
-          onClick={onBack}
-          className="flex items-center gap-2 text-xs font-bold text-zinc-700 hover:text-zinc-900 cursor-pointer p-1"
-        >
-          <ArrowLeft className="w-4.5 h-4.5" />
-          <span>{isRu ? "Назад к результатам" : "Back to dashboard"}</span>
-        </button>
-
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => {
-              if (confirm(isRu ? "Вы уверены, что хотите удалить эту запись?" : "Confirm deletion of this note item?")) {
-                onDelete(item.id);
-              }
-            }}
-            className="p-2 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-all cursor-pointer border border-zinc-100"
-            title={isRu ? "Удалить элемент" : "Delete Item"}
-          >
-            <Trash2 className="w-4.5 h-4.5" />
-          </button>
-        </div>
-      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
