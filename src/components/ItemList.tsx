@@ -86,7 +86,7 @@ function FeedCard({ item, onClick, onDelete, onSync }: {
   const locale = "uk-UA";
   const dateStr = formatDate(parsed.date, parsed.start_time, locale);
   const needsReview = item.status === "needs_review" || item.status === "error";
-  const isDone = false; // no completed state in current data model
+  const isDone = !!parsed.completed;
 
   return (
     <div

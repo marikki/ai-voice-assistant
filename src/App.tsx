@@ -227,7 +227,7 @@ export default function App() {
       case "feed":
         return (
           <ItemList
-            items={items}
+            items={items.filter(i => !i.ai_parsed_result.completed)}
             variant="feed"
             onSelectItem={setSelectedItem}
             onDeleteItem={handleDeleteItem}

@@ -1,25 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { Mic, Keyboard, X, Loader2, Sparkles, Calendar, CheckSquare, FileText, AlertCircle } from "lucide-react";
-
-interface AISchema {
-  type: "calendar_event" | "reminder" | "notion_note" | "task" | "unclear";
-  title: string;
-  description?: string;
-  date: string | null;
-  start_time: string | null;
-  end_time?: string | null;
-  duration_minutes?: number | null;
-  priority?: string | null;
-  target_service: string;
-  tags?: string[];
-  confidence: number;
-  [key: string]: unknown;
-}
-
-interface Item {
-  id: string;
-  [key: string]: unknown;
-}
+import type { Item, AISchema } from "./ItemList";
 
 interface Props {
   isOpen: boolean;

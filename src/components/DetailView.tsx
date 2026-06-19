@@ -1,36 +1,7 @@
 import React, { useState } from "react";
 import { RefreshCw, Clock, Save, Hash } from "lucide-react";
 import StatusBadge from "./StatusBadge";
-
-interface AISchema {
-  type: "calendar_event" | "reminder" | "notion_note" | "task" | "unclear";
-  title: string;
-  description: string;
-  date: string | null;
-  start_time: string | null;
-  end_time: string | null;
-  duration_minutes: number | null;
-  priority: "low" | "medium" | "high" | null;
-  target_service: "google_calendar" | "notion" | "reminders" | "unclear";
-  tags: string[];
-  auto_save: boolean;
-  needs_review: boolean;
-  confidence: number;
-}
-
-interface Item {
-  id: string;
-  original_transcript: string;
-  ai_parsed_result: AISchema;
-  item_type: "calendar_event" | "reminder" | "notion_note" | "task" | "unclear";
-  target_service: "google_calendar" | "notion" | "reminders" | "unclear";
-  external_service_id: string | null;
-  status: "saved" | "error" | "needs_review";
-  confidence: number;
-  error_message: string | null;
-  created_at: string;
-  updated_at: string;
-}
+import type { Item, AISchema } from "./ItemList";
 
 interface DetailViewProps {
   item: Item;
