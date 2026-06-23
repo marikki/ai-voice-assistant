@@ -15,6 +15,11 @@ export default defineConfig(() => {
         manifest: false, // use our own /manifest.json
         workbox: {
           globPatterns: ['**/*.{js,css,html,png,svg,ico,woff2}'],
+          // Don't serve the cached app shell for /api/* navigations.
+          // Without this the OAuth links (e.g. <a href="/api/auth/google/connect">)
+          // get intercepted by the SW navigation fallback and render the home
+          // page instead of redirecting to Google.
+          navigateFallbackDenylist: [/^\/api\//],
           runtimeCaching: [
             {
               urlPattern: /^\/api\//,

@@ -400,6 +400,18 @@ async function getAuthedClient(tokens: GoogleTokens, db: Database): Promise<Inst
       console.log("[Auth] Google access token refreshed.");
     } catch (err: any) {
       console.error("[Auth] Token refresh failed:", err.message);
+      // invalid_grant = refresh token is permanently dead (revoked/expired).
+      // Flip connection flags to false and drop the dead token so the UI
+      // stops claiming "Connected" and prompts a reconnect. Leave transient
+      // failures (network blips) alone so a temporary glitch doesn't log out.
+      const reason = err?.response?.data?.error ?? err?.message ?? "";
+      if (String(reason).includes("invalid_grant")) {
+        delete db.google_tokens;
+        db.settings.google_calendar_connected = false;
+        db.settings.google_tasks_connected = false;
+        saveDb(db);
+        console.warn("[Auth] invalid_grant — cleared Google tokens, marked disconnected.");
+      }
       throw new Error("Google token expired and refresh failed. Please reconnect.");
     }
   }
@@ -570,6 +582,76 @@ async function syncToRealServices(item: Item, db: Database): Promise<void> {
     } else {
       item.status = "needs_review";
       item.error_message = "Notion не настроен: добавь токен и ID базы в настройках.";
+    }
+  }
+}
+
+// ─── Update existing item in external service ─────────────
+
+async function updateInExternalService(item: Item, db: Database): Promise<void> {
+  const extId = item.external_service_id;
+  if (!extId || db.settings.mock_mode) return;
+
+  const parsed = item.ai_parsed_result;
+  const service = item.target_service;
+
+  if (service === "google_calendar" && db.settings.google_calendar_connected && db.google_tokens) {
+    try {
+      const auth = await getAuthedClient(db.google_tokens, db);
+      const cal = google.calendar({ version: "v3", auth });
+      const startDate = parsed.date ?? new Date().toISOString().split("T")[0];
+      const startTime = parsed.start_time ?? "09:00";
+      const endTime   = parsed.end_time ?? `${String(parseInt(startTime.split(":")[0]) + 1).padStart(2, "0")}:00`;
+      await cal.events.patch({
+        calendarId: "primary",
+        eventId: extId,
+        requestBody: {
+          summary:     parsed.title,
+          description: parsed.description,
+          start: { dateTime: `${startDate}T${startTime}:00`, timeZone: process.env.TZ || "Europe/Kyiv" },
+          end:   { dateTime: `${startDate}T${endTime}:00`,   timeZone: process.env.TZ || "Europe/Kyiv" },
+        },
+      });
+      console.log("[sync] Google Calendar event updated:", extId);
+    } catch (err: any) {
+      console.error("[sync] Google Calendar update failed:", err.message);
+    }
+
+  } else if (service === "reminders" && db.settings.google_tasks_connected && db.google_tokens) {
+    try {
+      const auth = await getAuthedClient(db.google_tokens, db);
+      const tasks = google.tasks({ version: "v1", auth });
+      const lists = await tasks.tasklists.list({ maxResults: 1 });
+      const listId = lists.data.items?.[0]?.id ?? "@default";
+      await tasks.tasks.patch({
+        tasklist: listId,
+        task: extId,
+        requestBody: {
+          title:  parsed.title,
+          notes:  parsed.description,
+          due:    parsed.date ? `${parsed.date}T00:00:00.000Z` : undefined,
+          status: (parsed as any).completed ? "completed" : "needsAction",
+        },
+      });
+      console.log("[sync] Google Task updated:", extId);
+    } catch (err: any) {
+      console.error("[sync] Google Tasks update failed:", err.message);
+    }
+
+  } else if (service === "notion" && db.settings.notion_connected) {
+    const token = db.settings.notion_token || process.env.NOTION_TOKEN;
+    if (!token) return;
+    try {
+      const notion = getNotionClient(token);
+      await notion.pages.update({
+        page_id: extId,
+        properties: {
+          Name: { title: [{ text: { content: parsed.title } }] },
+        },
+      } as any);
+      console.log("[sync] Notion page updated:", extId);
+    } catch (err: any) {
+      console.error("[sync] Notion update failed:", err.message);
     }
   }
 }
@@ -1149,13 +1231,12 @@ app.post("/api/items/batch", aiLimiter, async (req, res) => {
 });
 
 // 4. Update item
-app.put("/api/items/:id", (req, res) => {
+app.put("/api/items/:id", async (req, res) => {
   const { id } = req.params;
   const db = getDb();
   const idx = db.items.findIndex(i => i.id === id);
   if (idx === -1) return res.status(404).json({ error: "Not found" });
 
-  // Only allow safe fields to be updated
   const allowed = ["original_transcript", "ai_parsed_result", "item_type",
     "target_service", "status", "error_message"] as const;
   const update: any = {};
@@ -1165,6 +1246,12 @@ app.put("/api/items/:id", (req, res) => {
 
   db.items[idx] = { ...db.items[idx], ...update, updated_at: new Date().toISOString() };
   saveDb(db);
+
+  // Best-effort: push changes to external service (non-blocking)
+  updateInExternalService(db.items[idx], db).catch(e =>
+    console.error("[put] updateInExternalService error:", e.message)
+  );
+
   res.json(db.items[idx]);
 });
 
@@ -1188,23 +1275,31 @@ app.delete("/api/items/:id", async (req, res) => {
   saveDb(db);
 
   // Also delete from real external services
-  if (extId && !db.settings.mock_mode && db.google_tokens) {
+  if (extId && !db.settings.mock_mode) {
     try {
-      const auth = await getAuthedClient(db.google_tokens, db);
-      if (service === "google_calendar") {
-        const cal = google.calendar({ version: "v3", auth });
-        await cal.events.delete({ calendarId: "primary", eventId: extId });
-        console.log("Google Calendar event deleted:", extId);
-      } else if (service === "reminders") {
-        const tasks = google.tasks({ version: "v1", auth });
-        const lists = await tasks.tasklists.list({ maxResults: 1 });
-        const listId = lists.data.items?.[0]?.id ?? "@default";
-        await tasks.tasks.delete({ tasklist: listId, task: extId });
-        console.log("Google Task deleted:", extId);
+      if ((service === "google_calendar" || service === "reminders") && db.google_tokens) {
+        const auth = await getAuthedClient(db.google_tokens, db);
+        if (service === "google_calendar") {
+          const cal = google.calendar({ version: "v3", auth });
+          await cal.events.delete({ calendarId: "primary", eventId: extId });
+          console.log("[delete] Google Calendar event deleted:", extId);
+        } else {
+          const tasks = google.tasks({ version: "v1", auth });
+          const lists = await tasks.tasklists.list({ maxResults: 1 });
+          const listId = lists.data.items?.[0]?.id ?? "@default";
+          await tasks.tasks.delete({ tasklist: listId, task: extId });
+          console.log("[delete] Google Task deleted:", extId);
+        }
+      } else if (service === "notion" && db.settings.notion_connected) {
+        const token = db.settings.notion_token || process.env.NOTION_TOKEN;
+        if (token) {
+          const notion = getNotionClient(token);
+          await notion.pages.update({ page_id: extId, archived: true } as any);
+          console.log("[delete] Notion page archived:", extId);
+        }
       }
     } catch (err: any) {
-      // Log but don't fail — item is already removed from local DB
-      console.error("External delete failed:", err.message);
+      console.error("[delete] External delete failed:", err.message);
     }
   }
 
@@ -1806,7 +1901,7 @@ function startMorningDigestCron() {
       const todayKey = nowKyiv.toISOString().slice(0, 10);
 
       const targetHour = db.settings.morning_digest_hour ?? 8;
-      if (hour === targetHour && minute < 2 && todayKey !== lastDigestDate) {
+      if (hour === targetHour && minute === 0 && todayKey !== lastDigestDate) {
         lastDigestDate = todayKey;
         await buildAndSendMorningDigest();
       }
